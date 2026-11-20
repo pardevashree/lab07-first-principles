@@ -1,4 +1,29 @@
+import json
+from pathlib import Path
+
+import matplotlib.pyplot as plt
+import pandas as pd
 import torch
+from sklearn.dummy import DummyRegressor
+from sklearn.linear_model import LinearRegression
+from sklearn.metrics import mean_absolute_error
+from torch import nn
+
+from bikes_data import TARGET, make_rentals
+from model import BikeNet
+from prepare import BikeDataset, make_loaders, make_preprocessor, split_frame
+
+SEED = 42
+EPOCHS = 100
+REPORTS = Path("reports")
+
+# main run first, then one change at a time
+RUNS = {
+    "main": {"hidden": 32, "lr": 1e-3},
+    "lr_too_small": {"hidden": 32, "lr": 1e-5},
+    "lr_too_large": {"hidden": 32, "lr": 0.5},
+    "huge_network": {"hidden": 512, "lr": 1e-3},
+}
 
 
 def run_epoch(model, loader, loss_fn, optimizer=None):
@@ -19,3 +44,137 @@ def run_epoch(model, loader, loss_fn, optimizer=None):
             n += len(y)
 
     return total_loss / n, total_abs / n
+
+
+def fit(model, train_loader, val_loader, loss_fn, optimizer, epochs):
+    history = []
+    best_val, best_state = float("inf"), None
+
+    for epoch in range(1, epochs + 1):
+        train_loss, _ = run_epoch(model, train_loader, loss_fn, optimizer)
+        val_loss, val_mae = run_epoch(model, val_loader, loss_fn)
+        history.append(
+            {
+                "epoch": epoch,
+                "train_loss": train_loss,
+                "val_loss": val_loss,
+                "val_mae": val_mae,
+            }
+        )
+        if val_loss < best_val:
+            best_val = val_loss
+            best_state = {k: v.clone() for k, v in model.state_dict().items()}
+
+    model.load_state_dict(best_state)  # put back the best epoch's weights
+    return history
+
+
+def prepare_data():
+    df = make_rentals()
+    train, val, test = split_frame(df)
+    pre = make_preprocessor()
+    pre.fit(train)  # fitted on train rows only
+    X = {
+        "train": pre.transform(train),
+        "val": pre.transform(val),
+        "test": pre.transform(test),
+    }
+    y = {
+        "train": train[TARGET].to_numpy(),
+        "val": val[TARGET].to_numpy(),
+        "test": test[TARGET].to_numpy(),
+    }
+    return X, y
+
+
+def run_experiment(data, hidden=32, lr=1e-3, batch_size=64, epochs=EPOCHS):
+    X, y = data
+    torch.manual_seed(SEED)
+    datasets = [BikeDataset(X[k], y[k]) for k in ("train", "val", "test")]
+    train_loader, val_loader, test_loader = make_loaders(
+        *datasets, batch_size=batch_size, seed=SEED
+    )
+    model = BikeNet(n_inputs=X["train"].shape[1], hidden=hidden)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    history = fit(model, train_loader, val_loader, nn.MSELoss(), optimizer, epochs)
+    return model, history, test_loader
+
+
+def plot_curves(history, path, title):
+    df = pd.DataFrame(history)
+    best = df.loc[df["val_loss"].idxmin()]
+    plt.figure(figsize=(7, 4))
+    plt.plot(df["epoch"], df["train_loss"], label="train loss")
+    plt.plot(df["epoch"], df["val_loss"], label="validation loss")
+    plt.axvline(
+        best["epoch"],
+        linestyle="--",
+        color="gray",
+        label=f"best epoch ({int(best['epoch'])})",
+    )
+    plt.yscale("log")
+    plt.xlabel("epoch")
+    plt.ylabel("loss (MSE, log scale)")
+    plt.title(title)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(path, dpi=150)
+    plt.close()
+
+
+def main():
+    REPORTS.mkdir(exist_ok=True)
+    data = prepare_data()
+    X, y = data
+    metrics = {}
+
+    # baselines, fitted on train rows only
+    baselines = {"mean": DummyRegressor(strategy="mean"), "linear": LinearRegression()}
+    for name, base in baselines.items():
+        base.fit(X["train"], y["train"])
+        metrics[name] = {
+            "val_mae": float(mean_absolute_error(y["val"], base.predict(X["val"]))),
+            "test_mae": float(mean_absolute_error(y["test"], base.predict(X["test"]))),
+        }
+
+    rows = []
+    main_model, main_test_loader, main_history = None, None, None
+    for name, settings in RUNS.items():
+        model, history, test_loader = run_experiment(data, **settings)
+        df = pd.DataFrame(history)
+        best = df.loc[df["val_loss"].idxmin()]
+        rows.append(
+            {
+                "run": name,
+                **settings,
+                "best_epoch": int(best["epoch"]),
+                "best_val_mae": round(float(best["val_mae"]), 3),
+                "final_train_loss": round(float(df["train_loss"].iloc[-1]), 3),
+                "final_val_loss": round(float(df["val_loss"].iloc[-1]), 3),
+            }
+        )
+        curve_file = "learning_curves.png" if name == "main" else f"curves_{name}.png"
+        plot_curves(history, REPORTS / curve_file, name)
+        if name == "main":
+            main_model, main_test_loader, main_history = model, test_loader, df
+
+    main_history.to_csv(REPORTS / "history.csv", index=False)
+    pd.DataFrame(rows).to_csv(REPORTS / "experiments.csv", index=False)
+
+    # the test rows are used once, for the main run only
+    test_loss, test_mae = run_epoch(main_model, main_test_loader, nn.MSELoss())
+    best_row = main_history.loc[main_history["val_loss"].idxmin()]
+    metrics["network"] = {
+        "val_mae": float(best_row["val_mae"]),
+        "test_mae": float(test_mae),
+        "test_loss": float(test_loss),
+    }
+    with open(REPORTS / "metrics.json", "w") as f:
+        json.dump(metrics, f, indent=2)
+
+    print(json.dumps(metrics, indent=2))
+    print(pd.DataFrame(rows).to_string(index=False))
+
+
+if __name__ == "__main__":
+    main()

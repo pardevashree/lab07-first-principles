@@ -2,14 +2,17 @@
 Run `python bikes_data.py` to see the first rows. Every call with the same
 seed returns identical rows, so everyone works from the same table.
 """
+
 import numpy as np
 import pandas as pd
 
 STATION_TYPES = ["downtown", "residential", "park"]
 TARGET = "rentals"
 
+
 def _bump(hour, centre, width):
     return np.exp(-0.5 * ((hour - centre) / width) ** 2)
+
 
 def make_rentals(n: int = 6000, seed: int = 2026) -> pd.DataFrame:
     """Return n invented station-hours with the number of bikes rented."""
@@ -51,6 +54,7 @@ def make_rentals(n: int = 6000, seed: int = 2026) -> pd.DataFrame:
             "rentals": rentals,
         }
     )
+
 
 if __name__ == "__main__":
     frame = make_rentals()
