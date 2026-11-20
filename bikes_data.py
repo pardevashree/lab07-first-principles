@@ -54,6 +54,5 @@ def make_rentals(n: int = 6000, seed: int = 2026) -> pd.DataFrame:
 
 if __name__ == "__main__":
     frame = make_rentals()
-
-print(frame.head())
-print(frame["rentals"].describe().round(2))
+    print(frame.head())
+    print(frame["rentals"].describe().round(2))
