@@ -128,7 +128,6 @@ def main():
     X, y = data
     metrics = {}
 
-    # baselines, fitted on train rows only
     baselines = {"mean": DummyRegressor(strategy="mean"), "linear": LinearRegression()}
     for name, base in baselines.items():
         base.fit(X["train"], y["train"])
@@ -137,8 +136,7 @@ def main():
             "test_mae": float(mean_absolute_error(y["test"], base.predict(X["test"]))),
         }
 
-    rows = []
-    main_model, main_test_loader, main_history = None, None, None
+    rows, results = [], {}
     for name, settings in RUNS.items():
         model, history, test_loader = run_experiment(data, **settings)
         df = pd.DataFrame(history)
@@ -153,18 +151,21 @@ def main():
                 "final_val_loss": round(float(df["val_loss"].iloc[-1]), 3),
             }
         )
-        curve_file = "learning_curves.png" if name == "main" else f"curves_{name}.png"
-        plot_curves(history, REPORTS / curve_file, name)
-        if name == "main":
-            main_model, main_test_loader, main_history = model, test_loader, df
+        plot_curves(history, REPORTS / f"curves_{name}.png", name)
+        results[name] = (model, test_loader, df)
 
-    main_history.to_csv(REPORTS / "history.csv", index=False)
+    # the final network is chosen on validation MAE only
+    final = min(rows, key=lambda r: r["best_val_mae"])["run"]
+    final_model, final_test_loader, final_df = results[final]
+    plot_curves(final_df, REPORTS / "learning_curves.png", f"final network: {final}")
+    final_df.to_csv(REPORTS / "history.csv", index=False)
     pd.DataFrame(rows).to_csv(REPORTS / "experiments.csv", index=False)
 
-    # the test rows are used once, for the main run only
-    test_loss, test_mae = run_epoch(main_model, main_test_loader, nn.MSELoss())
-    best_row = main_history.loc[main_history["val_loss"].idxmin()]
+    # the test rows are used once, for the chosen network only
+    test_loss, test_mae = run_epoch(final_model, final_test_loader, nn.MSELoss())
+    best_row = final_df.loc[final_df["val_loss"].idxmin()]
     metrics["network"] = {
+        "run": final,
         "val_mae": float(best_row["val_mae"]),
         "test_mae": float(test_mae),
         "test_loss": float(test_loss),
